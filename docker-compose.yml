@@ -1,0 +1,157 @@
+name: policy-billing-core
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # One-shot: applies db/migrations/*.sql (db/migrate.ts) then exits 0. Reuses the backend image
+  # unmodified — ts-node/typescript/pg/dotenv are root npm-workspaces dependencies already present
+  # in it — only `command`/`working_dir` differ from the `backend` service.
+  migrate:
+    image: policy-billing-core-backend:local
+    build:
+      context: .
+      dockerfile: packages/backend/Dockerfile
+    working_dir: /app
+    command: ["npm", "run", "migrate"]
+    environment:
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  backend:
+    image: policy-billing-core-backend:local
+    build:
+      context: .
+      dockerfile: packages/backend/Dockerfile
+    ports:
+      - "${BACKEND_PORT:-3000}:3000"
+    environment:
+      PORT: 3000
+      POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB}
+      APP_DB_USER: app_user
+      APP_DB_PASSWORD: ${APP_DB_PASSWORD}
+      API_KEY: ${API_KEY}
+      CORS_ORIGIN: ${CORS_ORIGIN}
+      RATE_LIMIT_WINDOW_MS: ${RATE_LIMIT_WINDOW_MS:-60000}
+      RATE_LIMIT_MAX_REQUESTS: ${RATE_LIMIT_MAX_REQUESTS:-100}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  frontend:
+    image: policy-billing-core-frontend:local
+    build:
+      context: .
+      dockerfile: packages/frontend/Dockerfile
+    ports:
+      - "${FRONTEND_PORT:-5173}:5173"
+    environment:
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/api}
+      VITE_API_KEY: ${VITE_API_KEY}
+      # In-network Compose service name — see vite.config.ts's dev-server proxy and the
+      # VITE_DEV_API_PROXY_TARGET comment in .env.example. This is what actually fixes the
+      # test-e2e containerized-profile blocker (the `frontend`/`playwright` services can't reach
+      # the backend at `localhost`, only at its Compose service name).
+      VITE_DEV_API_PROXY_TARGET: http://backend:3000
+    depends_on:
+      - backend
+
+  # --- Test-runner services (Compose profiles — never started by a plain `docker compose up`) ---
+
+  # docker compose --profile test-integration run --rm newman
+  newman:
+    image: postman/newman:6-alpine
+    profiles: ["test-integration"]
+    volumes:
+      - ./postman:/etc/newman:ro
+    entrypoint:
+      - newman
+      - run
+      - /etc/newman/collections/policy-billing-core.postman_collection.json
+      - -e
+      - /etc/newman/environments/local.postman_environment.json
+      # The committed environment's baseUrl (http://localhost:3000) is for interactive/local
+      # Postman use, run from the host. Inside this container, "localhost" is the container
+      # itself, not the backend service — override to the in-network Compose service name (same
+      # problem/pattern as the frontend service's VITE_DEV_API_PROXY_TARGET).
+      - --env-var
+      - baseUrl=http://backend:3000
+    depends_on:
+      - backend
+
+  # docker compose --profile test-e2e run --rm playwright
+  # Placeholder wiring: playwright/playwright.config.ts and playwright/tests/*.spec.ts are added by
+  # later user-story phases (T041, T052, T069) — this service definition is ready for them.
+  playwright:
+    image: mcr.microsoft.com/playwright:v1.47.0-jammy
+    profiles: ["test-e2e"]
+    working_dir: /app/playwright
+    volumes:
+      - ./playwright:/app/playwright
+    command: ["sh", "-c", "npm install && npx playwright test"]
+    environment:
+      PLAYWRIGHT_BASE_URL: http://frontend:5173
+    depends_on:
+      - backend
+      - frontend
+
+  # docker compose --profile test-e2e-visual run --rm playwright-visual
+  # Same suite as `playwright` above, run against playwright.visual.config.ts instead: records a
+  # .webm video of every test (not just failures) into ./playwright/test-results/, browsable
+  # afterward with `cd playwright && npx playwright show-report`. No display is available in this
+  # container, so PLAYWRIGHT_HEADLESS stays "true" here — this profile is for getting a recording
+  # out, not for live-watching the browser (do that locally instead: `cd playwright &&
+  # PLAYWRIGHT_HEADLESS=false npm run test:visual`, with the dev stack already running).
+  playwright-visual:
+    image: mcr.microsoft.com/playwright:v1.47.0-jammy
+    profiles: ["test-e2e-visual"]
+    working_dir: /app/playwright
+    volumes:
+      - ./playwright:/app/playwright
+    command: ["sh", "-c", "npm install && npx playwright test --config=playwright.visual.config.ts"]
+    environment:
+      PLAYWRIGHT_BASE_URL: http://frontend:5173
+      PLAYWRIGHT_HEADLESS: "true"
+    depends_on:
+      - backend
+      - frontend
+
+  # docker compose --profile test-load run --rm k6
+  # Placeholder wiring: k6/endorsement-load.js and k6/payment-load.js are added by Phase 6 (T070,
+  # T071) — this service definition is ready for them.
+  k6:
+    image: grafana/k6:latest
+    profiles: ["test-load"]
+    volumes:
+      - ./k6:/scripts:ro
+    environment:
+      K6_BASE_URL: http://backend:3000
+      API_KEY: ${API_KEY}
+    entrypoint: ["k6", "run", "/scripts/endorsement-load.js"]
+    depends_on:
+      - backend
+
+volumes:
+  pgdata:

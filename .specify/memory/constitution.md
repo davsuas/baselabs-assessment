@@ -1,19 +1,21 @@
 <!--
 Sync Impact Report
 ==================
-Version change: [TEMPLATE] → 1.0.0 (initial ratification)
-Modified principles: n/a (template placeholders replaced with concrete principles)
-Added sections:
-  - Core Principles: I. Test-Driven Development, II. Financial Integrity
-    (Atomicity, Idempotency, Balance), III. Append-Only Auditable History,
-    IV. Simplicity & Maintainability (SOLID/KISS/DRY/YAGNI), V. Security by
-    Default, VI. Raw SQL & Integer-Cents Money, VII. Scoped, Timeboxed Delivery
-  - Technology & Architecture Constraints (stack, monorepo layout, containerization)
-  - Development Workflow & Quality Gates
-  - Governance
-Removed sections: none (template placeholders only)
-Deferred items: none — all user-supplied constraints were governance-scoped and
-  have been incorporated directly; no non-governance intents were present.
+Version change: 1.1.0 → 1.2.0
+Modified principles:
+  - VI. Raw SQL & Integer-Cents Money → tightened (not redefined): application
+    code MUST NOT issue inline ad-hoc DML/SELECT statements for domain
+    reads/writes; it MUST call hand-written PostgreSQL functions (mutations)
+    and views (reads) instead. Still raw SQL, still no ORM/query builder — the
+    "no ORM" guarantee is unchanged, only the required interface shape is new.
+  - V. Security by Default → expanded with authentication, rate limiting, CORS,
+    and response-caching requirements.
+Added sections: none (existing sections expanded in place)
+Removed sections: none
+Deferred items: none — all values in this amendment were explicitly directed
+  by the user (Docker Compose scope, API-key auth over OAuth2, SQL-via-
+  functions/views, React version/hooks pattern) or are direct consequences of
+  those directions.
 Templates checked for alignment:
   - .specify/templates/plan-template.md — generic, no principle-specific
     references requiring edits; Constitution Check gate reads this file at
@@ -95,31 +97,67 @@ over-engineering is exactly as disqualifying here as sloppiness.
 
 All external input (API request bodies, path/query parameters) MUST be
 validated at the boundary before touching business logic or SQL. All SQL
-access MUST use parameterized queries — string-concatenated SQL is
-prohibited. Secrets and connection strings MUST be supplied via environment
-variables and MUST NOT be committed to the repository; an `.env.example`
-(with no real values) is the required substitute. No card numbers, bank
-credentials, or other real payment credentials may be collected, stored, or
-logged anywhere in the system, consistent with this project's payment-data-
-ingestion-only scope.
+access MUST use parameterized queries/function-calls — string-concatenated
+SQL is prohibited, including when building calls to the functions/views
+required by Principle VI. Secrets and connection strings MUST be supplied via
+environment variables and MUST NOT be committed to the repository; an
+`.env.example` (with no real values) is the required substitute. No card
+numbers, bank credentials, or other real payment credentials may be
+collected, stored, or logged anywhere in the system, consistent with this
+project's payment-data-ingestion-only scope.
 
-Rationale: security defects are non-negotiable regardless of project size, and
+Every API request MUST carry a caller credential (a static API key issued via
+environment configuration) validated by a request-level authorization
+middleware; requests without a valid credential MUST be rejected before
+reaching business logic. OAuth2 is explicitly rejected as disproportionate to
+this project's scope (single trusted operator, local-only, no user
+directory) — it would itself be the kind of full authentication/authorization
+system the assessment brief places out of scope. Every endpoint MUST sit
+behind rate limiting to bound abuse/retry storms, and CORS MUST be configured
+to an explicit allow-list (the local frontend origin), never a wildcard.
+Read endpoints MAY use short-lived, explicitly-scoped response caching where
+it does not risk serving stale financial state (e.g. never cache in a way
+that could mask a just-posted payment or endorsement); financial mutation
+endpoints MUST NOT be cached.
+
+Rationale: security defects are non-negotiable regardless of project size,
 this scenario handles financial data where injection or secret leakage has
-outsized consequences.
+outsized consequences, and an insurance/fintech-flavored API left
+unauthenticated or unthrottled is not a credible demonstration of backend
+judgment.
 
 ### VI. Raw SQL & Integer-Cents Money
 
-Database access MUST use raw SQL (hand-written migrations and queries) — no
-ORM or query builder that hides the schema or generates SQL implicitly. All
-monetary values MUST be stored and computed exclusively as integer cents;
+Database access MUST use raw, hand-written SQL — no ORM or query builder that
+hides the schema or generates SQL implicitly. Specifically: every domain read
+MUST go through a hand-written PostgreSQL view (or a function returning a
+set/table), and every domain write (endorsement acceptance, payment
+acceptance, and any other financial mutation) MUST go through a hand-written
+PostgreSQL function that performs its own inserts/updates and — because a
+single top-level function invocation executes within one implicit
+transaction — provides atomicity in the database layer itself (satisfying
+Principle II) rather than relying on application-level `BEGIN`/`COMMIT`
+orchestration. Application code MUST NOT contain inline ad-hoc `INSERT`/
+`UPDATE`/multi-statement `SELECT` sequences for domain data; it calls these
+functions/views with parameterized arguments only. Migrations remain plain,
+hand-written `.sql` files (schema, functions, views) — this is a structural
+requirement on top of "raw SQL," not a departure from it: no ORM, no query
+builder, still hand-written SQL end to end.
+
+All monetary values MUST be stored and computed exclusively as integer cents;
 floating-point types MUST NOT be used for any monetary quantity at rest, in
-transit, or in intermediate calculation. Proration MUST use the specified
-deterministic rounding rule (round-half-away-from-zero) applied to integer
-inputs only.
+transit, or in intermediate calculation — including inside SQL functions,
+where computation MUST use integer/`bigint` arithmetic, never `float`/`real`/
+`double precision`. Proration MUST use the specified deterministic rounding
+rule (round-half-away-from-zero) applied to integer inputs only.
 
 Rationale: these are explicit, non-negotiable requirements of the assessment
-brief, and floating-point money is a well-known source of silent financial
-drift.
+brief (raw SQL, no ORM, integer-cents money), and pushing financial mutations
+into database functions both gets atomicity "for free" from Postgres's
+transaction model and is a direct, deliberate demonstration of SQL depth —
+procedural logic, transactions, and views — which is exactly what "backend
+and SQL foundations" evaluates. Floating-point money remains a well-known
+source of silent financial drift regardless of which layer computes it.
 
 ### VII. Scoped, Timeboxed Delivery
 
@@ -139,17 +177,63 @@ an unfinished ambitious one, and evaluators are told to penalize overbuilding.
 
 - **Language**: TypeScript on both backend and frontend; no untyped JavaScript
   in application source.
-- **Backend data access**: raw SQL migrations and queries only, no ORM (see
-  Principle VI).
+- **Backend runtime**: Node.js with Express; zod (or an equivalent schema
+  validator) for boundary input validation; an authorization middleware
+  enforcing the API-key requirement; a rate-limiting middleware; a CORS
+  middleware with an explicit origin allow-list (Principle V). Prefer the
+  framework surface that stays easiest to explain and modify live over one
+  with more built-in magic (Principle IV).
+- **Backend data access**: PostgreSQL via the `pg` driver. All domain reads go
+  through hand-written views/table-returning functions; all domain writes go
+  through hand-written PostgreSQL functions; no ORM or query builder
+  (Principle VI). Migrations are plain, sequentially numbered `.sql` files
+  (schema, functions, views) applied by a minimal custom runner; no
+  heavyweight migration framework.
+- **Frontend runtime**: the latest stable React release, with TypeScript,
+  built with Vite. Shared/reusable stateful logic (API calls, form
+  submission/validation state, polling/refetch behavior) MUST be extracted
+  into custom hooks rather than duplicated across components. No UI component
+  library or design system beyond what is needed to satisfy the Minimal
+  Frontend requirement (Principle VII).
 - **Repository layout**: monorepo with clearly separated packages/directories
   for backend, frontend, and shared/database concerns (e.g. migrations and any
   types shared across backend/frontend), structured so a reviewer can locate a
   component without a guided tour.
-- **Containerization**: the full local stack (API, database, frontend) MUST be
-  runnable via Docker, orchestrated with Docker Compose for one-command local
-  startup.
+- **Containerization**: the full local stack MUST be runnable via a single
+  Docker Compose invocation, covering: the API, PostgreSQL, the frontend, and
+  the project's test tooling (a Postman/newman runner service, a Playwright
+  runner service, and a k6 runner service) so that unit, integration, E2E, and
+  load tests are all runnable through the same one-command local environment
+  without additional host-machine setup.
 - **Money representation**: integer cents end-to-end, including over the wire
   in API request/response JSON.
+
+## Testing Strategy
+
+Each tool below is scoped to the layer it verifies; none substitutes for
+another, and Principle I's minimum coverage list MUST be satisfied primarily
+at the unit layer, where the logic actually lives.
+
+- **Unit tests — Jest**: the primary vehicle for Principle I's required
+  coverage (proration/rounding, duplicate delivery, wrong-currency rejection,
+  balanced ledger writes, hash-chain verification including a tampered case).
+  Backend and frontend packages each carry their own Jest suite; frontend
+  component tests use React Testing Library conventions.
+- **Integration/contract tests — Postman**: collections and environments
+  exercise the six REST endpoints (with the required API-key credential) as a
+  black-box HTTP client would, including the idempotent-replay and
+  duplicate-payment request pairs, run via a Docker Compose newman service
+  against the rest of the running local stack.
+- **Load/stress tests — k6**: scripted scenarios, run via a Docker Compose k6
+  service, targeting the endorsement and payment endpoints to observe
+  behavior under concurrent load and under rate limiting; informative for the
+  on-call/monitoring note, not a merge-blocking gate given the assessment's
+  timebox.
+- **UI/E2E tests — Playwright**: run via a Docker Compose Playwright service,
+  drives the minimal frontend through the primary flows (apply endorsement,
+  record payment, view policy/ledger/history) against the running stack,
+  asserting the loading/success/validation-error/server-error states required
+  by the frontend spec.
 
 ## Development Workflow & Quality Gates
 
@@ -162,6 +246,23 @@ an unfinished ambitious one, and evaluators are told to penalize overbuilding.
 - AI-assisted code is permitted but every submitted line MUST be understood by
   the author well enough to explain and modify it live; the README MUST note
   where AI tools were used and what was manually verified.
+- Work is divided across four specialized roles (implemented as Claude Code
+  subagents under `.claude/agents/`), each accountable for a distinct
+  quality gate:
+  - **backend-developer** — Express/TypeScript API, hand-written SQL
+    migrations/functions/views, proration/idempotency/ledger logic,
+    authorization/rate-limit/CORS middleware, Jest unit tests for backend
+    code.
+  - **frontend-developer** — React/TypeScript UI, Jest + React Testing
+    Library component tests, API integration and the four required UI states.
+  - **qa-developer** — owns cross-cutting test coverage: Postman collections/
+    environments, k6 load scripts, Playwright E2E specs, and verifying
+    Principle I's minimum coverage list is actually met end-to-end.
+  - **security-auditor** — reviews changes against Principle V (input
+    validation, parameterized SQL, secret handling) and general OWASP-class
+    risks before a change is considered done.
+  A change touching financial logic MUST pass review from both the owning
+  developer role and the security-auditor before it is considered complete.
 
 ## Governance
 
@@ -185,4 +286,4 @@ Principle IV and, if unjustifiable, simplified instead. Use `CLAUDE.md` for
 day-to-day runtime development guidance (commands, current project state);
 this constitution governs principles, not operational commands.
 
-**Version**: 1.0.0 | **Ratified**: 2026-08-05 | **Last Amended**: 2026-08-05
+**Version**: 1.2.0 | **Ratified**: 2026-08-05 | **Last Amended**: 2026-08-05

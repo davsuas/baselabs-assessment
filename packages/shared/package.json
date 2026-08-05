@@ -1,0 +1,11 @@
+{
+  "name": "@policy-billing-core/shared",
+  "version": "1.0.0",
+  "private": true,
+  "description": "TypeScript types shared between the backend and frontend, mirroring contracts/rest-api.md.",
+  "main": "src/types.ts",
+  "types": "src/types.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  }
+}

@@ -1,0 +1,12 @@
+/**
+ * Page shell (BLAB-002 US2). Single-column, fluid layout capped by `--content-max-width`; no
+ * fixed widths wider than 375px on any child (research.md §5).
+ */
+.shell {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: var(--content-max-width);
+  margin: 0 auto;
+  padding: var(--space-4);
+}

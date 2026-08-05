@@ -1,0 +1,41 @@
+/**
+ * Policy state view styling (BLAB-002 US2). A bordered card with a definition-list grid for the
+ * policy's key facts, plus the server-derived summary/suggested-action text set apart visually.
+ */
+.section {
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  padding: var(--space-4);
+  background-color: #fff;
+}
+
+.heading {
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+  margin-bottom: var(--space-3);
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-2) var(--space-4);
+}
+
+.grid dt {
+  color: var(--color-muted);
+  font-size: var(--font-size-sm);
+}
+
+.grid dd {
+  font-weight: 500;
+}
+
+.summary {
+  margin-top: var(--space-4);
+  color: var(--color-text);
+}
+
+.suggestedAction {
+  margin-top: var(--space-2);
+  color: var(--color-accent);
+}
