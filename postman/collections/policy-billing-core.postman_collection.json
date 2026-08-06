@@ -1,0 +1,547 @@
+{
+  "info": {
+    "_postman_id": "d4a1c9e0-5b3f-4a2e-9f0a-c9e0d4a1c9e0",
+    "name": "BLAB-001 Policy Billing & Ledger Core",
+    "description": "Black-box HTTP contract tests for the Policy Administration System take-home (docs/BLAB-001-policy-billing-core/spec.md, contracts/rest-api.md). Run against a local Docker Compose stack with the 'PAS Local' environment, via `docker compose --profile test-integration run --rm newman` (quickstart.md). Seed data matches docs/assessment.md (policy.json / events.json). Every request carries an explicit `X-API-Key: {{apiKey}}` header except the 'Unauthorized' negative case, which deliberately omits it. Deliberately NOT using collection-level auth here: `newman:6-alpine` does not honor a request-level `auth` override (neither `noauth` nor a differing `apikey` value) against a collection-level `apikey` auth block — it always sends the collection-level credential regardless of the request's own auth setting. Verified directly against this image; explicit per-request headers are the portable workaround.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "lastEndorsementId",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "Endorsements",
+      "item": [
+        {
+          "name": "Apply Endorsement - Success",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200 or 201', function () {",
+                  "    pm.expect([200, 201]).to.include(pm.response.code);",
+                  "});",
+                  "",
+                  "const json = pm.response.json();",
+                  "",
+                  "pm.test('response includes a billing document with an integer-cents amount', function () {",
+                  "    pm.expect(json).to.have.property('billing_document');",
+                  "    pm.expect(json.billing_document).to.have.property('amount_cents');",
+                  "    pm.expect(Number.isInteger(json.billing_document.amount_cents)).to.be.true;",
+                  "});",
+                  "",
+                  "pm.test('prorated delta matches the documented business rule to the cent', function () {",
+                  "    // term_days = 2027-01-01 - 2026-01-01 = 365; remaining_days = 2027-01-01 - 2026-07-01 = 184",
+                  "    // delta = round_half_away_from_0((144000 - 120000) * 184 / 365) = round(12098.63...) = 12099",
+                  "    pm.expect(json.billing_document.amount_cents).to.eql(12099);",
+                  "});",
+                  "",
+                  "if (json.billing_document && json.billing_document.id) {",
+                  "    pm.collectionVariables.set('lastEndorsementId', json.billing_document.id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-API-Key", "value": "{{apiKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"idempotency_key\": \"{{endorsementIdemKey}}\",\n  \"effective_date\": \"2026-07-01\",\n  \"new_annual_premium_cents\": 144000,\n  \"reason\": \"Water-shutoff discount removed\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/policies/{{policyId}}/endorsements",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "policies", "{{policyId}}", "endorsements"]
+            },
+            "description": "Sample event from docs/assessment.md events.json (idempotency_key END-2001). Expects one billing document + one policy event created. idempotency_key travels in the body only (contracts/rest-api.md)."
+          }
+        },
+        {
+          "name": "Apply Endorsement - Duplicate Delivery (Idempotent Replay)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200 (original result returned, not a new resource)', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "const json = pm.response.json();",
+                  "",
+                  "pm.test('returns the same billing document as the original request, no duplicate created', function () {",
+                  "    const lastId = pm.collectionVariables.get('lastEndorsementId');",
+                  "    if (lastId) {",
+                  "        pm.expect(json.billing_document.id).to.eql(lastId);",
+                  "    }",
+                  "});",
+                  "",
+                  "pm.test('idempotency result signals a duplicate/replay, not a fresh application', function () {",
+                  "    pm.expect(json).to.have.property('idempotency_result');",
+                  "    pm.expect(json.idempotency_result).to.eql('duplicate_ignored');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-API-Key", "value": "{{apiKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"idempotency_key\": \"{{endorsementIdemKey}}\",\n  \"effective_date\": \"2026-07-01\",\n  \"new_annual_premium_cents\": 144000,\n  \"reason\": \"Water-shutoff discount removed\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/policies/{{policyId}}/endorsements",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "policies", "{{policyId}}", "endorsements"]
+            },
+            "description": "Same idempotency_key AND same payload as 'Apply Endorsement - Success'. Run this request AFTER that one. Must return the original result with zero new effects (FR-005, SC-002)."
+          }
+        },
+        {
+          "name": "Apply Endorsement - Conflicting Payload (Same Key, Different Data)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 409 (idempotency conflict)', function () {",
+                  "    pm.response.to.have.status(409);",
+                  "});",
+                  "",
+                  "const json = pm.response.json();",
+                  "",
+                  "pm.test('error response identifies an idempotency-key conflict', function () {",
+                  "    pm.expect(json.error).to.eql('idempotency_conflict');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-API-Key", "value": "{{apiKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"idempotency_key\": \"{{endorsementIdemKey}}\",\n  \"effective_date\": \"2026-07-01\",\n  \"new_annual_premium_cents\": 999900,\n  \"reason\": \"Different reason, same key - should be rejected\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/policies/{{policyId}}/endorsements",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "policies", "{{policyId}}", "endorsements"]
+            },
+            "description": "Same idempotency_key as the success request but a different new_annual_premium_cents. MUST fail clearly with zero side effects (FR-006)."
+          }
+        },
+        {
+          "name": "Apply Endorsement - Effective Date Outside Term (Invalid)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 422 (business-rule rejection)', function () {",
+                  "    pm.response.to.have.status(422);",
+                  "});",
+                  "",
+                  "const json = pm.response.json();",
+                  "",
+                  "pm.test('error identifies the date-out-of-term rule', function () {",
+                  "    pm.expect(json.error).to.eql('effective_date_out_of_term');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-API-Key", "value": "{{apiKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"idempotency_key\": \"END-2099\",\n  \"effective_date\": \"2028-01-01\",\n  \"new_annual_premium_cents\": 150000,\n  \"reason\": \"Effective date is after term_end 2027-01-01\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/policies/{{policyId}}/endorsements",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "policies", "{{policyId}}", "endorsements"]
+            },
+            "description": "effective_date falls outside [term_start, term_end]. MUST be rejected with no side effects (FR-002, edge case)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Payments",
+      "item": [
+        {
+          "name": "Record Payment - Success",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200 or 201', function () {",
+                  "    pm.expect([200, 201]).to.include(pm.response.code);",
+                  "});",
+                  "",
+                  "const json = pm.response.json();",
+                  "",
+                  "pm.test('payment applied with matching amount_cents', function () {",
+                  "    pm.expect(json.amount_cents).to.eql(12099);",
+                  "});",
+                  "",
+                  "pm.collectionVariables.set('lastPaymentIdOrKey', json.external_payment_id || json.payment_id || pm.environment.get('paymentIdemKey'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-API-Key", "value": "{{apiKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"idempotency_key\": \"{{paymentIdemKey}}\",\n  \"external_payment_id\": \"{{paymentIdemKey}}\",\n  \"amount_cents\": 12099,\n  \"currency\": \"USD\",\n  \"received_at\": \"2026-07-03T18:30:00Z\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/policies/{{policyId}}/payments",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "policies", "{{policyId}}", "payments"]
+            },
+            "description": "Sample event from docs/assessment.md events.json (idempotency_key PAY-9001, matches the policy's USD currency)."
+          }
+        },
+        {
+          "name": "Record Payment - Duplicate Delivery",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200 (original result returned, not a new resource)', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "const json = pm.response.json();",
+                  "",
+                  "pm.test('idempotency result signals a duplicate/replay, not a fresh application', function () {",
+                  "    pm.expect(json).to.have.property('idempotency_result');",
+                  "    pm.expect(json.idempotency_result).to.eql('duplicate_ignored');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-API-Key", "value": "{{apiKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"idempotency_key\": \"{{paymentIdemKey}}\",\n  \"external_payment_id\": \"{{paymentIdemKey}}\",\n  \"amount_cents\": 12099,\n  \"currency\": \"USD\",\n  \"received_at\": \"2026-07-03T18:30:00Z\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/policies/{{policyId}}/payments",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "policies", "{{policyId}}", "payments"]
+            },
+            "description": "Identical payload to 'Record Payment - Success', simulating an upstream at-least-once redelivery (docs/assessment.md's second PAY-9001 entry in events.json). Run AFTER that request. MUST NOT double-apply the balance/ledger effect (FR-009, SC-003)."
+          }
+        },
+        {
+          "name": "Record Payment - Wrong Currency (Rejected)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 422 (business-rule rejection)', function () {",
+                  "    pm.response.to.have.status(422);",
+                  "});",
+                  "",
+                  "const json = pm.response.json();",
+                  "",
+                  "pm.test('error identifies a currency mismatch', function () {",
+                  "    pm.expect(json.error).to.eql('currency_mismatch');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-API-Key", "value": "{{apiKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"idempotency_key\": \"{{wrongCurrencyPaymentIdemKey}}\",\n  \"external_payment_id\": \"{{wrongCurrencyPaymentIdemKey}}\",\n  \"amount_cents\": 5000,\n  \"currency\": \"EUR\",\n  \"received_at\": \"2026-07-04T10:00:00Z\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/policies/{{policyId}}/payments",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "policies", "{{policyId}}", "payments"]
+            },
+            "description": "Sample event from docs/assessment.md events.json (idempotency_key PAY-9002, EUR against a USD policy). MUST fail atomically with zero balance/ledger effect (FR-008, SC-004). Matches the documented rejected_events example: {\"id\": \"PAY-9002\", \"reason\": \"currency mismatch\"}. This is the failure-path example for the video walkthrough."
+          }
+        },
+        {
+          "name": "Record Payment - Non-Positive Amount (Invalid)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 422 (business-rule rejection)', function () {",
+                  "    pm.response.to.have.status(422);",
+                  "});",
+                  "",
+                  "const json = pm.response.json();",
+                  "",
+                  "pm.test('error identifies an invalid amount', function () {",
+                  "    pm.expect(json.error).to.eql('invalid_amount');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "X-API-Key", "value": "{{apiKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"idempotency_key\": \"PAY-9999\",\n  \"external_payment_id\": \"PAY-9999\",\n  \"amount_cents\": 0,\n  \"currency\": \"USD\",\n  \"received_at\": \"2026-07-05T10:00:00Z\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/api/policies/{{policyId}}/payments",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "policies", "{{policyId}}", "payments"]
+            },
+            "description": "amount_cents of zero. MUST be rejected as invalid (edge case in spec.md)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Policy",
+      "item": [
+        {
+          "name": "Get Policy State",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "const json = pm.response.json();",
+                  "",
+                  "pm.test('response includes the required policy-state fields', function () {",
+                  "    ['policy_id', 'status', 'annual_premium_cents', 'open_balance_cents', 'history'].forEach(function (field) {",
+                  "        pm.expect(json).to.have.property(field);",
+                  "    });",
+                  "});",
+                  "",
+                  "pm.test('annual_premium_cents is an integer (never a float)', function () {",
+                  "    pm.expect(Number.isInteger(json.annual_premium_cents)).to.be.true;",
+                  "});",
+                  "",
+                  "pm.test('ETag header is present for conditional GET support', function () {",
+                  "    pm.response.to.have.header('ETag');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-API-Key", "value": "{{apiKey}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/policies/{{policyId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "policies", "{{policyId}}"]
+            },
+            "description": "Run this after the Endorsements and Payments requests to see cumulative state. Expected shape per contracts/rest-api.md endpoint 3 (FR-016, FR-023)."
+          }
+        },
+        {
+          "name": "Get Policy - Not Found",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 404', function () {",
+                  "    pm.response.to.have.status(404);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-API-Key", "value": "{{apiKey}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/policies/{{unknownPolicyId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "policies", "{{unknownPolicyId}}"]
+            },
+            "description": "Unknown policy ID. MUST return a clear not-found error (edge case in spec.md)."
+          }
+        },
+        {
+          "name": "Get Policy - Unauthorized (No API Key)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 401', function () {",
+                  "    pm.response.to.have.status(401);",
+                  "});",
+                  "",
+                  "const json = pm.response.json();",
+                  "",
+                  "pm.test('error identifies unauthorized', function () {",
+                  "    pm.expect(json.error).to.eql('unauthorized');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{baseUrl}}/api/policies/{{policyId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "policies", "{{policyId}}"]
+            },
+            "description": "Deliberately omits the X-API-Key header (no `auth` block, empty `header` array) to prove every route is protected (FR-024, constitution Principle V)."
+          }
+        },
+        {
+          "name": "Get Ledger",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "const json = pm.response.json();",
+                  "",
+                  "pm.test('ledger reports balanced = true', function () {",
+                  "    pm.expect(json.balanced).to.eql(true);",
+                  "});",
+                  "",
+                  "pm.test('every transaction has equal debits and credits', function () {",
+                  "    const transactions = json.transactions || [];",
+                  "    pm.expect(transactions.length).to.be.above(0);",
+                  "    transactions.forEach(function (txn) {",
+                  "        pm.expect(txn.debits_cents).to.eql(txn.credits_cents);",
+                  "    });",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-API-Key", "value": "{{apiKey}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/policies/{{policyId}}/ledger",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "policies", "{{policyId}}", "ledger"]
+            },
+            "description": "MUST prove the double-entry ledger is balanced (FR-017, SC-005)."
+          }
+        },
+        {
+          "name": "Get History Verify - Intact Chain",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 200', function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  "",
+                  "const json = pm.response.json();",
+                  "",
+                  "pm.test('history reports valid = true with an event count', function () {",
+                  "    pm.expect(json.valid).to.eql(true);",
+                  "    pm.expect(json).to.have.property('event_count');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-API-Key", "value": "{{apiKey}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/api/policies/{{policyId}}/history/verify",
+              "host": ["{{baseUrl}}"],
+              "path": ["api", "policies", "{{policyId}}", "history", "verify"]
+            },
+            "description": "MUST recompute the hash chain and report it valid for an untampered policy (FR-015, SC-006). The tampered-chain negative case requires privileged DB access and lives in backend Jest instead (quickstart.md §7)."
+          }
+        }
+      ]
+    }
+  ]
+}

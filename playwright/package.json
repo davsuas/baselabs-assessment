@@ -1,0 +1,13 @@
+{
+  "name": "@policy-billing-core/playwright",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Playwright E2E suite for BLAB-001 Policy Billing & Ledger Core, driving the running frontend/backend stack (quickstart.md §4, docker-compose.yml's `test-e2e` profile).",
+  "scripts": {
+    "test": "playwright test",
+    "test:visual": "playwright test --config=playwright.visual.config.ts"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.47.0"
+  }
+}

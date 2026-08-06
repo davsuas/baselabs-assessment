@@ -1,0 +1,38 @@
+/**
+ * Policy page layout (BLAB-002 US2). Stacks the heading, status/loading/error banners, policy
+ * state view, timeline, and both forms in a single column with consistent vertical rhythm.
+ */
+.page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
+
+.heading {
+  font-size: var(--font-size-xl);
+  font-weight: 600;
+}
+
+.status {
+  color: var(--color-muted);
+  font-size: var(--font-size-sm);
+}
+
+.error {
+  border: 1px solid var(--color-error);
+  background-color: color-mix(in srgb, var(--color-error) 8%, white);
+  color: var(--color-error);
+  border-radius: 4px;
+  padding: var(--space-3) var(--space-4);
+}
+
+.refreshing {
+  color: var(--color-muted);
+  font-size: var(--font-size-sm);
+}
+
+.forms {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-5);
+}
